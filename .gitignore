@@ -1,0 +1,59 @@
+# === Java / Fabric Mod Project Git Ignore ===
+
+# Gradle build output & caches
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar  # keep wrapper if present
+
+# Loom / Fabric dev runtime dirs
+run/
+remappedSrc/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Eclipse
+.project
+.classpath
+.settings/
+
+# VS Code
+.vscode/
+
+# Logs & crash reports
+logs/
+*.log
+crash-reports/
+
+# Generated files / temp
+*.tmp
+*.bak
+*.swp
+*.swo
+*.orig
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Jar / distribution artifacts (don’t commit compiled mod outputs)
+*.jar
+!gradle-wrapper.jar
+
+# Minecraft user/runtime specific
+usernamecache.json
+usercache.json
+
+# Leave gradle.properties tracked (contains project version, etc.)
+!gradle.properties
+
+# Local environment / secrets (add as needed)
+.env
+.local/
+
+# If you later want to keep a releases folder, remove its exclusion below
+releases/
