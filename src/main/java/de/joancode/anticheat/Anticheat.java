@@ -28,7 +28,12 @@ public class Anticheat implements ModInitializer {
 	private static boolean PAYLOADS_REGISTERED = false;
 
 	private final Set<UUID> verifiedPlayers = ConcurrentHashMap.newKeySet();
-	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+		Thread t = new Thread(r, "anticheat-verification");
+		// Mark daemon so it doesn't block server shutdown
+		t.setDaemon(true);
+		return t;
+	});
 
 
 	@Override
@@ -44,59 +49,65 @@ public class Anticheat implements ModInitializer {
 		}
 
 		// Register the event for when a player joins
-		// First, during connection initialization, immediately reject clients that do not have our mod (no negotiated channel)
-		ServerPlayConnectionEvents.INIT.register((handler, server) -> {
-			// If the client cannot receive our verification payload channel, the mod is not installed
-			if (!ServerPlayNetworking.canSend(handler.getPlayer(), RequestVerificationPayload.ID)) {
-				LOGGER.warn("Disconnecting {}: missing required AntiCheat client mod.", handler.getPlayer().getName().getString());
-				handler.disconnect(Text.of("You must install the AntiCheat mod to join this server."));
-			}
-		});
-
-		// On join, start verification timeout for clients that passed the initial mod-present check
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			final ServerPlayerEntity player = handler.getPlayer();
 			final UUID playerUuid = player.getUuid();
 
-			// Safety: if mod somehow not present (race / edge), double-check and kick
-			if (!ServerPlayNetworking.canSend(player, RequestVerificationPayload.ID)) {
-				LOGGER.warn("Player {} reached JOIN without AntiCheat mod; disconnecting.", player.getName().getString());
-				handler.disconnect(Text.of("You must install the AntiCheat mod to join this server."));
-				return;
-			}
+			LOGGER.info("[AntiCheat] Player {} joined; initiating verification.", player.getName().getString());
 
-			// Schedule a task to kick the player if they don't verify in time
-				scheduler.schedule(() -> {
+			// Start timeout task (longer & clearer messaging)
+			scheduler.schedule(() -> {
 				if (!verifiedPlayers.contains(playerUuid)) {
-					// Use the server's main thread to kick the player
 					server.execute(() -> {
-						LOGGER.warn("Player {} failed to verify in time. Kicking.", player.getName().getString());
-						handler.disconnect(Text.of("Please install the server's anti-cheat mod."));
+						if (!player.isDisconnected()) {
+							LOGGER.warn("Player {} failed to verify (no response) within timeout; disconnecting.", player.getName().getString());
+							String msg = ServerPlayNetworking.canSend(player, RequestVerificationPayload.ID)
+								? "AntiCheat verification failed (no response)."
+								: "You must install the AntiCheat mod to join this server.";
+							player.networkHandler.disconnect(Text.of(msg));
+						}
 					});
 				}
-			}, 10, TimeUnit.SECONDS); // 10-second timeout
+			}, 12, TimeUnit.SECONDS); // 12-second timeout to allow for slow clients
 
-			// Send verification request to the client (they have the channel, ensured above)
-			ServerPlayNetworking.send(player, new RequestVerificationPayload());
+			// Attempt to send verification request; if channel missing we'll rely on timeout to kick with proper message
+			if (ServerPlayNetworking.canSend(player, RequestVerificationPayload.ID)) {
+				LOGGER.debug("[AntiCheat] Sending verification request to {}.", player.getName().getString());
+				ServerPlayNetworking.send(player, new RequestVerificationPayload());
+			} else {
+				LOGGER.debug("[AntiCheat] Player {} cannot receive verification payload (no mod); will be kicked on timeout.", player.getName().getString());
+			}
 		});
 
 		// Register the handler for the client's response
 		ServerPlayNetworking.registerGlobalReceiver(VerificationResponsePayload.ID, (payload, context) -> {
 			var player = context.player();
-			var mods = payload.installedMods();
-			var offending = mods.stream().filter(BANNED_MODS::contains).toList();
-			if (!offending.isEmpty()) {
-				LOGGER.warn("Player {} has banned mods: {}", player.getName().getString(), offending);
-				player.networkHandler.disconnect(Text.of("Banned mods: " + String.join(", ", offending)));
+			var server = player.getServer();
+			if (server == null) {
+				LOGGER.warn("[AntiCheat] Could not obtain server instance for player {} during verification response.", player.getName().getString());
 				return;
 			}
-			LOGGER.info("Player {} verified ({} mods).", player.getName().getString(), mods.size());
-			verifiedPlayers.add(player.getUuid());
+			// Ensure logic runs on main server thread
+			server.execute(() -> {
+				if (player.isDisconnected()) return; // Already gone
+				var mods = payload.installedMods();
+				if (mods == null) mods = Collections.emptyList();
+				LOGGER.info("[AntiCheat] Verification response from {}: {} mods (showing up to 5) {}", player.getName().getString(), mods.size(), mods.stream().limit(5).toList());
+				var offending = mods.stream().filter(BANNED_MODS::contains).toList();
+				if (!offending.isEmpty()) {
+					LOGGER.warn("Player {} has banned mods: {}", player.getName().getString(), offending);
+					player.networkHandler.disconnect(Text.of("Banned mods: " + String.join(", ", offending)));
+					return;
+				}
+				verifiedPlayers.add(player.getUuid());
+				LOGGER.info("Player {} successfully verified ({} total verified).", player.getName().getString(), verifiedPlayers.size());
+			});
 		});
 
 		// Clean up verified players when they disconnect
 		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-			verifiedPlayers.remove(handler.getPlayer().getUuid());
+			var removed = verifiedPlayers.remove(handler.getPlayer().getUuid());
+			if (removed) LOGGER.debug("[AntiCheat] Cleaned up verification state for {}.", handler.getPlayer().getName().getString());
 		});
 	}
 }
